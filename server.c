@@ -2,73 +2,120 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/select.h>
+#include <semaphore.h>
+#include "server.h"
 #include "handler.h"
+#include "threadpool.h"
 
-#define DEFAULT_PORT 8080
-
-int main(int argc, char *argv[])
+int setup_server_socket(int port)
 {
-    int port = (argc > 1) ? atoi(argv[1]) : DEFAULT_PORT;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
     struct sockaddr_in serverAddr = {0};
-    pthread_t thread;
-    int serverSocket;
-    struct sockaddr_in clientAddr;
-    socklen_t clientLen;
-    int *clientSocket;
 
-    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == -1)
-    {
-        perror("Error al crear el socket");
-        exit(EXIT_FAILURE);
-    }
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_addr.s_addr = INADDR_ANY;
     serverAddr.sin_port = htons(port);
 
-    if (bind(serverSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
-    {
-        perror("Error en bind");
-        close(serverSocket);
-        exit(EXIT_FAILURE);
-    }
+    bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr));
+    listen(sockfd, 10);
 
-    if (listen(serverSocket, 10) < 0)
-    {
-        perror("Error en listen");
-        close(serverSocket);
-        exit(EXIT_FAILURE);
-    }
+    return sockfd;
+}
 
-    printf("Servidor escuchando en el puerto %d...\n", port);
-
+void run_thread_mode(int serverSocket)
+{
     while (1)
     {
-        clientLen = sizeof(clientAddr);
-        clientSocket = malloc(sizeof(int));
+        struct sockaddr_in client;
+        pthread_t tid;
+        socklen_t len = sizeof(client);
+        int *arg = malloc(sizeof(int));
 
-        *clientSocket = accept(serverSocket, (struct sockaddr *)&clientAddr, &clientLen);
-        if (*clientSocket < 0)
+        int clientSocket = accept(serverSocket, (struct sockaddr *)&client, &len);
+
+        if (clientSocket < 0)
         {
-            perror("Error en accept");
-            free(clientSocket);
+            perror("accept");
             continue;
         }
 
-        if (pthread_create(&thread, NULL, handleClient, clientSocket) != 0)
+        *arg = clientSocket;
+        pthread_create(&tid, NULL, handle_client_threadmode, arg);
+        pthread_detach(tid);
+    }
+}
+
+void run_select_mode(int serverSocket)
+{
+    int fdmax = serverSocket;
+    fd_set master, readfds;
+    int i;
+
+    FD_ZERO(&master);
+    FD_SET(serverSocket, &master);
+
+    while (1)
+    {
+        readfds = master;
+        if (select(fdmax + 1, &readfds, NULL, NULL, NULL) < 0)
         {
-            perror("Error al crear el thread");
-            free(clientSocket);
+            perror("select");
+            break;
         }
-        else
+
+        for (i = 0; i <= fdmax; i++)
         {
-            pthread_detach(thread);
+            if (FD_ISSET(i, &readfds))
+            {
+                if (i == serverSocket)
+                {
+                    int newfd = accept(serverSocket, NULL, NULL);
+                    FD_SET(newfd, &master);
+                    if (newfd > fdmax)
+                        fdmax = newfd;
+                }
+                else
+                {
+                    handle_client(i);
+                    FD_CLR(i, &master);
+                }
+            }
         }
     }
+}
 
-    close(serverSocket);
-    return 0;
+sem_t tsem[64];
+int tindex = 0;
+
+void task_runnable(void *param)
+{
+    int clientSocket = *((int *)param);
+    handle_client(clientSocket);
+    free(param);
+    sem_post(&tsem[tindex++]);
+}
+
+void run_pool_mode(int serverSocket)
+{
+    threadpool_t *pool = threadpool_create(4, 8, 0);
+
+    while (1)
+    {
+        int clientSocket = accept(serverSocket, NULL, NULL);
+        int *arg = malloc(sizeof(int));
+        *arg = clientSocket;
+
+        sem_init(&tsem[tindex], 0, 0);
+        threadpool_add(pool, task_runnable, arg, 0);
+        sem_wait(&tsem[tindex]);
+    }
 }

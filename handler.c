@@ -1,87 +1,117 @@
+#include "handler.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <pthread.h>
 #include <sys/socket.h>
+#include <sys/sendfile.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
 
-void *handleClient(void *arg)
+#define BUFFER_SIZE 2048
+#define RESPONSE_SIZE 1024
+
+int ends_with(const char *str, const char *suffix)
 {
-    const char *response =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "<h1>Servidor C funcionando</h1>";
-    const char *notFound =
-        "HTTP/1.1 404 Not Found\r\n"
-        "Content-Type: text/plain\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "Imagen no encontrada";
-    char header[256];
-    char buffer[4096];
-    ssize_t bytesRead;
-    char verb[8], path[1024], version[16];
-    long imgSize;
-    FILE *img;
-    char *imgData;
+    size_t lenstr, lensuffix;
+    if (!str || !suffix)
+        return 0;
+    lenstr = strlen(str);
+    lensuffix = strlen(suffix);
+    if (lensuffix > lenstr)
+        return 0;
+    return strncmp(str + lenstr - lensuffix, suffix, lensuffix) == 0;
+}
 
-    int clientSocket = *(int *)arg;
-    free(arg);
+void send_image(int clientSocket, const char *path)
+{
+    struct stat st;
+    char header[RESPONSE_SIZE];
+    int imagefd = open(path, O_RDONLY);
+    off_t offset = 0;
+    ssize_t sent;
 
-    bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-    if (bytesRead <= 0)
+    if (imagefd < 0)
     {
-        close(clientSocket);
-        return NULL;
+        perror("open image");
+        return;
     }
 
-    buffer[bytesRead] = '\0';
+    fstat(imagefd, &st);
 
-    sscanf(buffer, "%s %s %s", verb, path, version);
+    snprintf(header, RESPONSE_SIZE,
+             "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %ld\r\nConnection: Close\r\n\r\n",
+             st.st_size);
+    send(clientSocket, header, strlen(header), 0);
 
-    printf("HTTP Request\n");
-    printf("Verbo: %s\n", verb);
-    printf("Ruta: %s\n", path);
-    printf("Versión: %s\n", version);
-
-    if (strcmp(path, "/conejo") == 0)
+    while (offset < st.st_size)
     {
-        img = fopen("conejo.jpg", "rb");
-        if (!img)
-        {
-            send(clientSocket, notFound, strlen(notFound), 0);
-            close(clientSocket);
-            return NULL;
-        }
+        sent = sendfile(clientSocket, imagefd, &offset, st.st_size - offset);
+        if (sent <= 0)
+            break;
+    }
 
-        fseek(img, 0, SEEK_END);
-        imgSize = ftell(img);
-        rewind(img);
+    close(imagefd);
+}
 
-        imgData = malloc(imgSize);
-        fread(imgData, 1, imgSize, img);
-        fclose(img);
+void handle_client(int clientSocket)
+{
+    char buffer[BUFFER_SIZE], verb[8], version[16], path[256], filename[512];
+    char *firstLine;
 
-        snprintf(header, sizeof(header),
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: image/jpeg\r\n"
-                 "Content-Length: %ld\r\n"
-                 "Connection: close\r\n"
-                 "\r\n",
-                 imgSize);
+    recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
 
-        send(clientSocket, header, strlen(header), 0);
-        send(clientSocket, imgData, imgSize, 0);
+    firstLine = strtok(buffer, "\r\n");
+    if (!firstLine)
+        return;
 
-        free(imgData);
+    sscanf(firstLine, "%s %s %s", verb, path, version);
+
+    if (debug)
+    {
+        printf("HTTP Request\n");
+        printf("Verbo: %s\n", verb);
+        printf("Ruta: %s\n", path);
+        printf("Versión: %s\n", version);
+    }
+
+    if (strcmp(path, "/") == 0)
+    {
+        const char *html = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>Servidor C funcionando</h1>";
+        send(clientSocket, html, strlen(html), 0);
+    }
+    else if (strcmp(path, "/Ping") == 0 || strcmp(path, "/ping") == 0)
+    {
+        const char *pong = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\npong";
+        send(clientSocket, pong, strlen(pong), 0);
     }
     else
     {
-        send(clientSocket, response, strlen(response), 0);
+        snprintf(filename, sizeof(filename), ".%s.jpg", path);
+        filename[strcspn(filename, "? ")] = 0;
+
+        if (access(filename, F_OK) == 0)
+        {
+            send_image(clientSocket, filename);
+        }
+        else
+        {
+            const char *notfound = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nImagen no encontrada.";
+            send(clientSocket, notfound, strlen(notfound), 0);
+        }
     }
 
     close(clientSocket);
+}
+
+void *handle_client_threadmode(void *arg)
+{
+    int clientSocket = *((int *)arg);
+    free(arg);
+
+    handle_client(clientSocket);
+
     return NULL;
 }
