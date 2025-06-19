@@ -93,15 +93,11 @@ void run_select_mode(int serverSocket)
     }
 }
 
-sem_t tsem[64];
-int tindex = 0;
-
 void task_runnable(void *param)
 {
     int clientSocket = *((int *)param);
     handle_client(clientSocket);
     free(param);
-    sem_post(&tsem[tindex++]);
 }
 
 void run_pool_mode(int serverSocket)
@@ -114,8 +110,6 @@ void run_pool_mode(int serverSocket)
         int *arg = malloc(sizeof(int));
         *arg = clientSocket;
 
-        sem_init(&tsem[tindex], 0, 0);
         threadpool_add(pool, task_runnable, arg, 0);
-        sem_wait(&tsem[tindex]);
     }
 }

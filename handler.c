@@ -61,6 +61,7 @@ void handle_client(int clientSocket)
     char buffer[BUFFER_SIZE], verb[8], version[16], path[256], filename[512];
     char *firstLine;
 
+    /*sleep(3);*/
     recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
 
     firstLine = strtok(buffer, "\r\n");
