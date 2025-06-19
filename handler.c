@@ -91,8 +91,7 @@ void handle_client(int clientSocket)
     else
     {
         snprintf(filename, sizeof(filename), ".%s.jpg", path);
-        filename[strcspn(filename, "? ")] = 0;
-
+        
         if (access(filename, F_OK) == 0)
         {
             send_image(clientSocket, filename);
